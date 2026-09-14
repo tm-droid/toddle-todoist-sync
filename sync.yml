@@ -1,0 +1,22 @@
+name: Sync Toddle to Todoist
+
+on:
+  schedule:
+    - cron: "0 22 * * *"  # 22:00 UTC = 6:00 AM Singapore time (UTC+8), daily
+  workflow_dispatch: {}     # lets you trigger it manually from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python toddle_todoist_sync.py
+        env:
+          TODDLE_ICS_URL: ${{ secrets.TODDLE_ICS_URL }}
+          TODOIST_API_TOKEN: ${{ secrets.TODOIST_API_TOKEN }}
+          TODOIST_PROJECT_ID: ${{ secrets.TODOIST_PROJECT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
