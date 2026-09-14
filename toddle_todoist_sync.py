@@ -154,10 +154,25 @@ def classify(task_type: str, class_name: str, title: str, description: str):
     return section_id, subject_label, type_label, priority
 
 
-def rewrite_title(raw_title: str, description: str) -> str:
+def fallback_title(raw_title: str, type_label: str) -> str:
+    """A verb-appropriate title when Gemini is unavailable or unconfigured,
+    used instead of a hardcoded "Complete X" for every single task."""
+    text = raw_title.lower()
+    if "due" in text or "project" in text:
+        verb = "Submit"
+    elif type_label in ("formative", "test"):
+        verb = "Take"
+    elif type_label == "summative":
+        verb = "Prepare for"
+    else:
+        verb = "Finish"
+    return f"{verb} {raw_title}"
+
+
+def rewrite_title(raw_title: str, description: str, type_label: str) -> str:
     """Turn a Toddle item title into a short action-item task name."""
     if not GEMINI_KEY:
-        return f"Complete {raw_title}"
+        return fallback_title(raw_title, type_label)
 
     prompt = (
         "Rewrite this school assignment title as a short action-item task "
@@ -178,7 +193,7 @@ def rewrite_title(raw_title: str, description: str) -> str:
         return text.strip().strip('"')
     except Exception as exc:  # fall back rather than crash the whole sync
         print(f"  ! Gemini rewrite failed ({exc}), using fallback title", file=sys.stderr)
-        return f"Complete {raw_title}"
+        return fallback_title(raw_title, type_label)
 
 
 def task_due_date(task: dict) -> str:
@@ -193,7 +208,8 @@ def task_due_date(task: dict) -> str:
 
 
 def active_tasks_by_key() -> dict:
-    """dedup key -> {"id", "due_date"} for every ACTIVE Todoist task.
+    """dedup key -> {"id", "due_date", "labels", "priority", "section_id"}
+    for every ACTIVE Todoist task.
 
     Note: Todoist's task list only returns active tasks -- a completed and
     checked-off task disappears from it entirely. See completed_task_keys()
@@ -209,7 +225,13 @@ def active_tasks_by_key() -> dict:
         resp.raise_for_status()
         data = resp.json()
         for task in data.get("results", []):
-            info = {"id": task.get("id"), "due_date": task_due_date(task)}
+            info = {
+                "id": task.get("id"),
+                "due_date": task_due_date(task),
+                "labels": set(task.get("labels") or []),
+                "priority": task.get("priority"),
+                "section_id": task.get("section_id"),
+            }
             for key in signature_keys(task.get("content", ""), task.get("description", "")):
                 tasks[key] = info
         cursor = data.get("next_cursor")
@@ -266,11 +288,11 @@ def create_task(content, description, due_date, section_id, labels, priority):
     return resp.json()
 
 
-def update_task_due_date(task_id: str, due_date: str):
-    # Unverified against live data (same caveat as everything else that's
-    # required a live-error round trip to confirm so far) -- if this 404s
-    # or 400s, the fix is almost certainly the URL shape or the payload key.
-    resp = requests.post(f"{TODOIST_API}/{task_id}", headers=HEADERS, json={"due_date": due_date})
+def update_task(task_id: str, **fields):
+    # The due_date-only version of this was confirmed working against live
+    # data; labels/priority/section_id in the same payload shape haven't
+    # been separately confirmed yet, but follow the identical pattern.
+    resp = requests.post(f"{TODOIST_API}/{task_id}", headers=HEADERS, json=fields)
     resp.raise_for_status()
 
 
@@ -316,12 +338,27 @@ def main():
             skipped += 1
             continue  # already completed -- never touch, reschedule or not
 
+        section_id, subject_label, type_label, priority = classify(
+            task_type, class_name, title, description
+        )
+        labels = [l for l in (subject_label, type_label) if l]
+
         match = next((active[k] for k in keys if k in active), None)
         if match:
             skipped += 1
+            changes = {}
             if match["due_date"] and match["due_date"] != due_date:
-                update_task_due_date(match["id"], due_date)
-                print(f"  ~ Rescheduled: {title}  ({match['due_date']} -> {due_date})")
+                changes["due_date"] = due_date
+            if set(labels) != match["labels"]:
+                changes["labels"] = labels
+            if PRIORITY_API[priority] != match["priority"]:
+                changes["priority"] = PRIORITY_API[priority]
+            if section_id and section_id != match["section_id"]:
+                changes["section_id"] = section_id
+            if changes:
+                update_task(match["id"], **changes)
+                summary = ", ".join(f"{k}={v}" for k, v in changes.items())
+                print(f"  ~ Updated: {title}  ({summary})")
                 updated += 1
             continue
 
@@ -329,12 +366,7 @@ def main():
             skipped += 1
             continue  # seen before via the local state file (e.g. later deleted)
 
-        section_id, subject_label, type_label, priority = classify(
-            task_type, class_name, title, description
-        )
-
-        new_title = rewrite_title(title, description)
-        labels = [l for l in (subject_label, type_label) if l]
+        new_title = rewrite_title(title, description, type_label)
         desc = f"[{title}]({link})" if link else title
 
         create_task(new_title, desc, due_date, section_id, labels, priority)
@@ -344,7 +376,7 @@ def main():
 
     save_synced_state(state_keys)
     print(
-        f"\nDone. Added {added}, updated {updated} due date(s), skipped {skipped} "
+        f"\nDone. Added {added}, updated {updated} task(s), skipped {skipped} "
         f"already-synced event(s), ignored {past_due} past-due event(s)."
     )
 
