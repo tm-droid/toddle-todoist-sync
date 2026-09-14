@@ -2,7 +2,9 @@ name: Sync Toddle to Todoist
 
 on:
   schedule:
-    - cron: "*/30 * * * *"  # every 30 minutes
+    - cron: "3,33 * * * *"  # every 30 minutes, offset from :00/:30 to dodge
+                            # GitHub's documented high-load congestion at the
+                            # top of every hour
   workflow_dispatch: {}     # lets you trigger it manually from the Actions tab
 
 jobs:
