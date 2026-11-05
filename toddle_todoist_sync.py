@@ -31,7 +31,7 @@ import json
 import os
 import re
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import requests
 from icalendar import Calendar
@@ -240,23 +240,28 @@ def active_tasks_by_key() -> dict:
     return tasks
 
 
-def completed_task_keys(since: str = "2026-08-01") -> set:
+def completed_task_keys(since: str | None = None) -> set:
     """dedup keys seen among COMPLETED tasks. These are never touched or
     recreated regardless of a reschedule -- if it's done, it's done.
 
     Uses a different endpoint (/tasks/completed/by_completion_date) than
     active_tasks_by_key(), and -- confirmed against Todoist's own docs --
-    that endpoint responds with "items"/"nextCursor" (camelCase), not
-    "results"/"next_cursor" like the regular task list does.
+    that endpoint responds with "items" and has used both camelCase and
+    snake_case for its pagination cursor.
+
+    Todoist limits the date range accepted by this endpoint. Keep the API
+    query within a rolling 90-day window; older synced links remain covered
+    by the local state file.
     """
     keys = set()
     cursor = None
     url = f"{TODOIST_API}/completed/by_completion_date"
+    since = since or (date.today() - timedelta(days=90)).isoformat()
     while True:
         params = {
-            "projectId": PROJECT_ID,
-            "since": since,
-            "until": date.today().isoformat(),
+            "project_id": PROJECT_ID,
+            "since": f"{since}T00:00:00Z",
+            "until": f"{date.today().isoformat()}T23:59:59Z",
             "limit": 200,
         }
         if cursor:
@@ -266,7 +271,7 @@ def completed_task_keys(since: str = "2026-08-01") -> set:
         data = resp.json()
         for task in data.get("items", []):
             keys.update(signature_keys(task.get("content", ""), task.get("description", "")))
-        cursor = data.get("nextCursor")
+        cursor = data.get("next_cursor") or data.get("nextCursor")
         if not cursor:
             break
     return keys
